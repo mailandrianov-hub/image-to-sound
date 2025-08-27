@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Image → Natural Harmonics Drone (no scales, slow & soft)</title>
+<style>
+  :root{color-scheme:light}
+  body{margin:24px;background:#0f1115;color:#e6e9ef;font:16px/1.5 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  .wrap{max-width:1200px;margin:0 auto}
+  h1{margin:0 0 8px} p{margin:0 0 16px;color:#b9bec7}
+  .row{display:flex;gap:16px;align-items:flex-start;flex-wrap:wrap}
+  .card{background:#161a22;border:1px solid #242a35;border-radius:12px;padding:12px}
+  .panel{flex:1 1 520px;min-width:320px}
+  canvas{max-width:520px;border:1px solid #242a35;border-radius:12px;background:#fff}
+  label{display:block;margin-top:12px;font-weight:700}
+  input[type=file],button,input[type=range],select{
+    margin-top:6px;padding:10px 12px;border-radius:10px;border:1px solid #2b3140;background:#fff;color:#0f1115
+  }
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:10px 16px}
+  .btns{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
+  button{cursor:pointer} button:disabled{opacity:.6;cursor:not-allowed}
+  .muted{color:#9aa1aa;font-size:13px}
+  .stat{font-family:ui-monospace,Menlo,monospace;margin-top:10px;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Фото → гармонический «plucked» дрон (медленно, мягко, без ладов)</h1>
+  <p>Паттерны, высота, панорама, дилей и реверберация полностью кодируются из изображения. Без осцилляторов — синус вычисляется в буфере.</p>
+
+  <div class="row">
+    <div class="panel card">
+      <input id="file" type="file" accept="image/*">
+
+      <div class="grid">
+        <div>
+          <label>Длительность (сек)</label>
+          <input id="dur" type="range" min="10" max="240" value="60" step="1">
+          <div class="muted"><span id="durVal">60</span> s</div>
+        </div>
+        <div>
+          <label>Громкость</label>
+          <input id="gain" type="range" min="10" max="250" value="160" step="1">
+          <div class="muted"><span id="gainVal">160</span>%</div>
+        </div>
+
+        <div>
+          <label>Сглаживание высоты</label>
+          <input id="pitchSmooth" type="range" min="2" max="64" value="24" step="1">
+          <div class="muted"><span id="pitchSmoothVal">24</span> окон</div>
+        </div>
+        <div>
+          <label>Диапазон фундаментала</label>
+          <select id="f0Range">
+            <option value="low" selected>низкий (30–80 Гц)</option>
+            <option value="mid">средний (60–180 Гц)</option>
+            <option value="high">высокий (120–360 Гц)</option>
+          </select>
+        </div>
+
+        <div>
+          <label>Кол-во гармоник</label>
+          <input id="harmCount" type="range" min="3" max="24" value="12" step="1">
+          <div class="muted"><span id="harmCountVal">12</span></div>
+        </div>
+        <div>
+          <label>Мягкость pluck</label>
+          <input id="pluckSoft" type="range" min="0" max="100" value="65" step="1">
+          <div class="muted"><span id="pluckSoftVal">65</span>%</div>
+        </div>
+
+        <div>
+          <label>Стерео-дилей mix</label>
+          <input id="delayMix" type="range" min="0" max="100" value="25" step="1">
+          <div class="muted"><span id="delayMixVal">25</span>%</div>
+        </div>
+        <div>
+          <label>Реверберация mix</label>
+          <input id="revMix" type="range" min="0" max="100" value="28" step="1">
+          <div class="muted"><span id="revMixVal">28</span>%</div>
+        </div>
+
+        <div>
+          <label>Сканирование</label>
+          <select id="scanMode">
+            <option value="rows" selected>по строкам</option>
+            <option value="cols">по столбцам</option>
+          </select>
+        </div>
+        <div>
+          <label>Стерео ширина</label>
+          <input id="stereo" type="range" min="0" max="100" value="40" step="1">
+          <div class="muted"><span id="stereoVal">40</span>%</div>
+        </div>
+      </div>
+
+      <div class="btns">
+        <button id="renderBtn" disabled>Синтезировать</button>
+        <button id="playBtn" disabled>▶︎ Воспроизвести</button>
+        <button id="stopBtn" disabled>⏹ Стоп</button>
+        <button id="exportBtn" disabled>Экспорт WAV</button>
+      </div>
+      <div class="stat" id="stats">Загрузите изображение.</div>
+    </div>
+
+    <div class="card">
+      <canvas id="c" width="640" height="480"></canvas>
+      <div class="muted">Предпросмотр изображения</div>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ===== UI ===== */
+const fileInput = document.getElementById('file');
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d',{willReadFrequently:true});
+const statsEl = document.getElementById('stats');
+
+const durEl = document.getElementById('dur'), durVal = document.getElementById('durVal');
+const gainEl = document.getElementById('gain'), gainVal = document.getElementById('gainVal');
+
+const pitchSmoothEl = document.getElementById('pitchSmooth'), pitchSmoothVal = document.getElementById('pitchSmoothVal');
+const f0RangeEl = document.getElementById('f0Range');
+
+const harmCountEl = document.getElementById('harmCount'), harmCountVal = document.getElementById('harmCountVal');
+const pluckSoftEl = document.getElementById('pluckSoft'), pluckSoftVal = document.getElementById('pluckSoftVal');
+
+const delayMixEl = document.getElementById('delayMix'), delayMixVal = document.getElementById('delayMixVal');
+const revMixEl = document.getElementById('revMix'), revMixVal = document.getElementById('revMixVal');
+
+const scanModeEl = document.getElementById('scanMode');
+const stereoEl = document.getElementById('stereo'), stereoVal = document.getElementById('stereoVal');
+
+const renderBtn = document.getElementById('renderBtn');
+const playBtn = document.getElementById('playBtn');
+const stopBtn = document.getElementById('stopBtn');
+const exportBtn = document.getElementById('exportBtn');
+
+[durEl,gainEl,pitchSmoothEl,harmCountEl,pluckSoftEl,delayMixEl,revMixEl,stereoEl]
+.forEach(el=>{
+  const m={dur:durVal,gain:gainVal,pitchSmooth:pitchSmoothVal,harmCount:harmCountVal,pluckSoft:pluckSoftVal,delayMix:delayMixVal,revMix:revMixVal,stereo:stereoVal}[el.id];
+  el.oninput=()=>{ if(m) m.textContent=el.value; };
+});
+
+/* ===== Audio chain ===== */
+let audioCtx=null, masterGain=null, convolver=null;
+let source=null, renderedBuffer=null, imgBitmap=null, isRendering=false;
+
+function ensureAudio(sr=48000){
+  if(!audioCtx){
+    try{ audioCtx=new (window.AudioContext||window.webkitAudioContext)({sampleRate:sr}); }
+    catch{ audioCtx=new (window.AudioContext||window.webkitAudioContext)(); }
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = (+gainEl.value)/100;
+    convolver = audioCtx.createConvolver(); // загрузим IR после рендера
+    convolver.connect(masterGain).connect(audioCtx.destination);
+  }
+  return audioCtx;
+}
+function stopAudio(){ if(source){ try{source.stop()}catch{}; try{source.disconnect()}catch{}; source=null; } }
+async function resumeAudio(){ ensureAudio(); if(audioCtx.state!=='running'){ try{ await audioCtx.resume(); }catch{} } }
+
+/* ===== Helpers (image) ===== */
+function getProcessingCanvas(w,h){ if(typeof OffscreenCanvas!=='undefined') return new OffscreenCanvas(w,h); const c=document.createElement('canvas'); c.width=w; c.height=h; return c; }
+
+/* Собираем фичи изображения: яркость по колонкам, карта краёв (Sobel), цвета */
+function analyzeImage(bitmap){
+  const TW=512, TH=512;
+  const off = getProcessingCanvas(TW, TH);
+  const octx = off.getContext('2d',{willReadFrequently:true});
+  octx.fillStyle='#fff'; octx.fillRect(0,0,TW,TH);
+  const sc=Math.min(TW/bitmap.width, TH/bitmap.height);
+  const w=Math.max(1,Math.floor(bitmap.width*sc)), h=Math.max(1,Math.floor(bitmap.height*sc));
+  octx.drawImage(bitmap,(TW-w)/2,(TH-h)/2,w,h);
+  const {data,width:W,height:H}=octx.getImageData(0,0,TW,TH);
+
+  const brightCols=new Float32Array(W); // средняя яркость по колонке 0..1
+  const edgeCols=new Float32Array(W);   // средняя сила края по колонке
+  let rSum=0,gSum=0,bSum=0;
+
+  // яркость/цвет
+  for(let x=0;x<W;x++){
+    let acc=0;
+    for(let y=0;y<H;y++){
+      const i=(y*W+x)*4;
+      const r=data[i], g=data[i+1], b=data[i+2];
+      rSum+=r; gSum+=g; bSum+=b;
+      acc += (0.299*r + 0.587*g + 0.114*b);
+    }
+    brightCols[x]=acc/(H*255);
+  }
+
+  // быстрая Sobel по колонкам (редко, в 2 пикселя шаг)
+  function lumAt(x,y){ const i=(y*W+x)*4; return (0.299*data[i]+0.587*data[i+1]+0.114*data[i+2])/255; }
+  for(let x=1;x<W-1;x++){
+    let eAcc=0, cnt=0;
+    for(let y=1;y<H-1;y+=2){
+      const gx = -lumAt(x-1,y-1)+lumAt(x+1,y-1)-lumAt(x-1,y+1)+lumAt(x+1,y+1);
+      const gy = -lumAt(x-1,y-1)-lumAt(x+1,y-1)+lumAt(x-1,y+1)+lumAt(x+1,y+1);
+      eAcc += Math.hypot(gx,gy); cnt++;
+    }
+    edgeCols[x]=eAcc/Math.max(1,cnt); // 0..~?
+  }
+
+  const meanR=rSum/(W*H), meanG=gSum/(W*H), meanB=bSum/(W*H);
+  const meanRGB=[meanR,meanG,meanB];
+
+  // «псевдо-объектность» — сколько раз edgeCols превышает локальный порог
+  let objness=0;
+  for(let x=2;x<W-2;x++){
+    const loc=(edgeCols[x-2]+edgeCols[x-1]+edgeCols[x]+edgeCols[x+1]+edgeCols[x+2])/5;
+    if(edgeCols[x]>loc*1.3) objness++;
+  }
+  objness/=W; // 0..1 приблизительно
+
+  return {W,H,brightCols,edgeCols,meanRGB,objness};
+}
+
+/* Сглаживание (скользящее среднее) */
+function smoothArray(a, win){
+  if(win<=1) return a.slice();
+  const out=new Float32Array(a.length);
+  let acc=0; const q=new Array(win).fill(0); let qi=0;
+  for(let i=0;i<a.length;i++){
+    acc-=q[qi]; q[qi]=a[i]; acc+=q[qi]; qi=(qi+1)%win;
+    out[i]=acc/Math.min(i+1,win);
+  }
+  return out;
+}
+
+/* Нормализация массива в [0..1] */
+function norm01(a){
+  let lo=Infinity, hi=-Infinity;
+  for(let i=0;i<a.length;i++){ const v=a[i]; if(v<lo) lo=v; if(v>hi) hi=v; }
+  const out=new Float32Array(a.length);
+  const d=hi-lo || 1;
+  for(let i=0;i<a.length;i++) out[i]=(a[i]-lo)/d;
+  return out;
+}
+
+/* ===== Synthesis bits ===== */
+
+/* кривые f0(t) строго из картинки: яркость по колонкам → диапазон f0 */
+function buildF0Curve(brightCols, range, sr, duration, smoothWin){
+  const cols = smoothArray(brightCols, smoothWin|0);
+  const s = norm01(cols); // 0..1
+  let fmin=30, fmax=80;
+  if(range==='mid'){ fmin=60; fmax=180; }
+  if(range==='high'){ fmin=120; fmax=360; }
+  // мэппинг с лёгкой экспонентой (музыкальнее)
+  function map(v){ const e= Math.pow(v,0.7); return fmin + (fmax-fmin)*e; }
+  // интерполяция по времени
+  const N = Math.floor(sr*duration);
+  const out = new Float32Array(N);
+  for(let i=0;i<N;i++){
+    const t = i/N;
+    const x = t*(s.length-1);
+    const i0=x|0, i1=Math.min(s.length-1, i0+1), f=x-i0;
+    const y = s[i0]*(1-f)+s[i1]*f;
+    out[i]=map(y);
+  }
+  // финальное сглаживание, чтобы точно медленно менялось
+  return smoothArray(out, Math.max(8, Math.floor(sr*0.02)));
+}
+
+/* детерминированные «плэки»: пики карты краёв */
+function extractOnsets(edgeCols, sr, duration){
+  const e = norm01(edgeCols);
+  // находим локальные пики на редуцированном масштабе
+  const th = 0.55;
+  const idx=[];
+  for(let x=2;x<e.length-2;x++){
+    const v=e[x];
+    if(v>th && v>e[x-1] && v>e[x+1]){
+      idx.push(x);
+    }
+  }
+  // если слишком мало — добавим равномерные опорные точки
+  if(idx.length<8){
+    for(let i=1;i<e.length;i+=Math.max(8, (e.length/16)|0)) idx.push(i);
+  }
+  // перевод в секунды (равномерно развёртываем по длительности)
+  const times=[];
+  for(const x of idx){
+    const t = (x/(e.length-1)) * duration;
+    times.push(t);
+  }
+  // удалим слишком плотные (оставляем минимум 150мс между)
+  const out=[];
+  let last=-999;
+  for(const t of times.sort((a,b)=>a-b)){
+    if(t-last >= 0.15){ out.push(t); last=t; }
+  }
+  return out;
+}
+
+/* огибающая pluck (экспоненциальная атака/спад, без щелчков) */
+function pluckEnv(N, sr, softness){
+  const atk = 0.005 + 0.02*(1 - softness/100); // 7..25 мс
+  const rel = 0.25 + 1.25*(softness/100);      // 0.25..1.5 c
+  const aN = Math.max(1, Math.floor(atk*sr));
+  const rN = Math.max(1, Math.floor(rel*sr));
+  const total = aN + rN;
+  const len = Math.min(N, total);
+  const env = new Float32Array(len);
+  for(let i=0;i<Math.min(aN,len);i++){
+    env[i] = i/aN;
+  }
+  for(let i=aN;i<len;i++){
+    const t=(i-aN)/rN;
+    env[i] = Math.pow(1-t, 2.0); // мягкий квадратичный спад
+  }
+  // кросс-фейд в хвост, если N>len
+  if(N>len){
+    const out=new Float32Array(N);
+    for(let i=0;i<len;i++) out[i]=env[i];
+    for(let i=len;i<N;i++){
+      const k = Math.max(0, 1 - (i-len)/(sr*0.02)); // 20мс хвост
+      out[i] = 0.0001*k;
+    }
+    return out;
+  }
+  return env;
+}
+
+/* аддитивная синтез-гранула: гармоники натурального ряда, мягкие веса */
+function renderPluckAdditive(f0Curve, t0, sr, env, harmCount, colorTilt, inharm){
+  const N = env.length;
+  const left = new Float32Array(N), right=new Float32Array(N);
+  const phase = new Float64Array(harmCount); // накопители фазы
+
+  // веса гармоник: ~1/n, окраска по цвету (красный→низ, синий→верх)
+  const weights = new Float32Array(harmCount);
+  for(let n=1;n<=harmCount;n++){
+    const base = 1.0/n;
+    const colorBoost = Math.pow(n/(harmCount), colorTilt>0? 1.0+colorTilt*0.8 : 1.0/(1.0+(-colorTilt)*0.8));
+    weights[n-1] = base * colorBoost;
+  }
+  // нормировка амплитуд
+  let sum=1e-9; for(let i=0;i<harmCount;i++) sum+=weights[i];
+  for(let i=0;i<harmCount;i++) weights[i]/=sum;
+
+  // лёгкий стерео-офсет фаз
+  const panPhase = 0.02; // ~2% фазы разнос
+  for(let i=0;i<N;i++){
+    const t = t0 + i/sr;
+    const f0 = f0Curve[Math.min(f0Curve.length-1, Math.floor(t*sr))];
+    let sL=0, sR=0;
+    for(let n=1;n<=harmCount;n++){
+      const stretch = 1 + inharm * (n*n)*0.0005; // «жёсткость струны» от текстуры
+      const f = f0 * n * stretch;
+      const inc = 2*Math.PI*f/sr;
+      const p = (phase[n-1] += inc);
+      const w = weights[n-1];
+      // лев/прав с микрофазовым сдвигом
+      sL += Math.sin(p) * w;
+      sR += Math.sin(p + inc*panPhase*n) * w;
+    }
+    left[i]  = sL * env[i];
+    right[i] = sR * env[i];
+  }
+  return {left,right};
+}
+
+/* стерео дилей (feedback, разные задержки из цветов) */
+function stereoDelay(L,R,sr, mix, dL, dR, fb){
+  if(mix<=0) return {L,R};
+  const n=L.length, outL=new Float32Array(n), outR=new Float32Array(n);
+  const dl=Math.max(1,Math.floor(dL*sr)), dr=Math.max(1,Math.floor(dR*sr));
+  for(let i=0;i<n;i++){
+    const dlv = i-dl>=0 ? outL[i-dl] : 0;
+    const drv = i-dr>=0 ? outR[i-dr] : 0;
+    const wetL = L[i] + fb*drv;
+    const wetR = R[i] + fb*dlv;
+    outL[i] = wetL;
+    outR[i] = wetR;
+  }
+  // mix
+  const m = mix;
+  for(let i=0;i<n;i++){ L[i]=L[i]*(1-m)+outL[i]*m; R[i]=R[i]*(1-m)+outR[i]*m; }
+  return {L,R};
+}
+
+/* лёгкий Schroeder reverb (комбы+allpass), параметры из цвета/«объектности» */
+function schroederReverb(L,R,sr, mix, color, objness){
+  if(mix<=0) return {L,R};
+  const n=L.length;
+  const outL=L.slice(), outR=R.slice();
+
+  // базовые времена комбо-задержек (в секундах)
+  const base = [0.0297,0.0371,0.0411,0.0437];
+  // цвет смещает длительности (синий → длиннее, красный → короче)
+  const [r,g,b] = color; const sum=Math.max(1,r+g+b);
+  const blu = b/sum, red = r/sum;
+  const colorTilt = (blu - red); // -красный..+синий
+  const scale = 1 + colorTilt*0.2 + objness*0.15;
+
+  // combs
+  const gains=[0.805,0.827,0.783,0.764].map(g=>Math.min(0.9, g + objness*0.05));
+  for(let c=0;c<4;c++){
+    const d = Math.max(1, Math.floor(base[c]*scale*sr));
+    const g = gains[c];
+    for(let i=d;i<n;i++){ outL[i]+= outL[i-d]*g; outR[i]+= outR[i-d]*g; }
+  }
+  // allpass x2
+  function allpass(arr, delaySamp, g){
+    const out=arr.slice(); const d=delaySamp;
+    for(let i=d;i<arr.length;i++){
+      const v = -g*arr[i] + arr[i-d] + g*out[i-d];
+      out[i]=v;
+    }
+    return out;
+  }
+  const ap1 = Math.floor(0.005*sr), ap2=Math.floor(0.0017*sr);
+  let aL = allpass(outL, ap1, 0.7); aL = allpass(aL, ap2, 0.7);
+  let aR = allpass(outR, ap1, 0.7); aR = allpass(aR, ap2, 0.7);
+
+  // mix
+  for(let i=0;i<n;i++){
+    L[i] = L[i]*(1-mix) + aL[i]*mix;
+    R[i] = R[i]*(1-mix) + aR[i]*mix;
+  }
+  return {L,R};
+}
+
+/* мягкий софт-клип + нормализация */
+function finalizeStereo(L,R,gainPct){
+  const n=L.length;
+  // нормировка
+  let peak=1e-9; for(let i=0;i<n;i++){ const a=Math.abs(L[i]); const b=Math.abs(R[i]); if(a>peak) peak=a; if(b>peak) peak=b; }
+  const target=0.85, boost=target/peak, g = boost*(gainPct/100);
+  for(let i=0;i<n;i++){
+    const l=L[i]*g, r=R[i]*g;
+    L[i]=l/(1+Math.abs(l)); R[i]=r/(1+Math.abs(r));
+  }
+}
+
+/* ===== Master render: всё детерминировано от картинки ===== */
+function renderFromImageNatural(bitmap, opts){
+  const sr=48000, N=Math.floor(sr*opts.duration);
+  const L=new Float32Array(N), R=new Float32Array(N);
+
+  const A = analyzeImage(bitmap);
+
+  // кривые высоты и события
+  const f0Curve = buildF0Curve(A.brightCols, opts.f0Range, sr, opts.duration, opts.pitchSmooth);
+  const onsets = extractOnsets(A.edgeCols, sr, opts.duration);
+
+  // количество гармоник и «цветовая окраска» гармоник: (B-R) → tilt
+  const [r,g,b]=A.meanRGB; const colorTilt = (b - r) / Math.max(1, r+g+b); // -красный..+синий
+  const harmCount = opts.harmCount|0;
+
+  // ингармоничность от «объектности»
+  const inharm = Math.min(0.5, A.objness*0.8);
+
+  // стерео ширина через фазовый сдвиг внутри гранул (используем позже внутри)
+  const envCache = {}; // кэш по длинам, чтобы не строить заново
+
+  // События (плэки) с плавной динамикой: их амплитуда из локальной яркости
+  for(const t0 of onsets){
+    const i0 = Math.floor(t0*sr);
+    if(i0>=N) continue;
+    const envLen = Math.min(Math.floor(sr*1.6), N - i0); // до ~1.6с
+    if(envLen<=0) continue;
+
+    const key = envLen + '|' + opts.pluckSoft;
+    let env = envCache[key];
+    if(!env){ env = pluckEnv(envLen, sr, opts.pluckSoft); envCache[key]=env; }
+
+    const {left,right} = renderPluckAdditive(f0Curve, t0, sr, env, harmCount, colorTilt, inharm);
+
+    // амплитуда из яркости в соответствующей колонке
+    const colIdx = Math.min(A.brightCols.length-1, Math.floor((t0/opts.duration)*(A.brightCols.length-1)));
+    const amp0 = 0.4 + 0.6 * A.brightCols[colIdx]; // 0.4..1.0
+
+    // панорама по отношению R/B: красный → влево, синий → вправо (мягко)
+    const pan = 0.5 + 0.5*colorTilt; // 0..1
+    const gL = Math.cos(pan*Math.PI/2), gR = Math.sin(pan*Math.PI/2);
+
+    for(let i=0;i<left.length;i++){
+      const j=i0+i; if(j>=N) break;
+      L[j] += left[i]*amp0*gL;
+      R[j] += right[i]*amp0*gR;
+    }
+  }
+
+  // Стерео дилей: задержки из цветов (больше синего → больше задержка справа)
+  const sumCol=Math.max(1,r+g+b);
+  const dl = 0.12 + (r/sumCol)*0.18; // 120..300ms
+  const dr = 0.12 + (b/sumCol)*0.22; // 120..340ms
+  const fb = 0.25 + A.objness*0.25;
+  stereoDelay(L,R,sr, (+opts.delayMix)/100, dl, dr, fb);
+
+  // Реверберация Шредера (комната) — сильно завязана на цвет/объектность
+  schroederReverb(L,R,sr, (+opts.revMix)/100, A.meanRGB, A.objness);
+
+  // Финализация
+  finalizeStereo(L,R, opts.gain);
+
+  // Соберём IR-буфер для Convolver (доп. воздух; очень лёгкий, 0.7с)
+  const ir = buildLightIR(sr, A.meanRGB, A.objness);
+
+  return {L,R, sampleRate:sr, ir};
+}
+
+/* Лёгкий IR (добавляет «воздух» в ConvolverNode), тоже из картинки */
+function buildLightIR(sr, meanRGB, objness){
+  const dur = 0.6 + objness*0.3; const n=Math.floor(sr*dur);
+  const irL=new Float32Array(n), irR=new Float32Array(n);
+  const [r,g,b]=meanRGB; const sum=Math.max(1,r+g+b);
+  const blu=b/sum, red=r/sum;
+  const tilt = (blu-red)*0.4;
+
+  // белый шум → экспоненциальный спад + простая окраска
+  let env=1, a=Math.pow(0.001, 1/(dur*sr));
+  for(let i=0;i<n;i++){
+    const wn = (Math.random()*2-1) * env;
+    const t=i/n;
+    const lpW = 0.5 + 0.5*Math.pow(t, 1+tilt); // чуть больше ВЧ в начале при синем
+    const v = wn*lpW;
+    irL[i]=v; irR[i]=v;
+    env*=a;
+  }
+  // нормировка
+  let peak=1e-9; for(let i=0;i<n;i++){ const a=Math.abs(irL[i]); if(a>peak) peak=a; }
+  const gk=0.8/peak; for(let i=0;i<n;i++){ irL[i]*=gk; irR[i]*=gk; }
+  return {L:irL,R:irR};
+}
+
+/* WAV helper */
+function interleavedStereoToWavPCM16(L,R,sampleRate){
+  const n=L.length, buffer=new ArrayBuffer(44+n*4), v=new DataView(buffer);
+  w(v,0,'RIFF'); v.setUint32(4,36+n*4,true); w(v,8,'WAVE');
+  w(v,12,'fmt '); v.setUint32(16,16,true); v.setUint16(20,1,true);
+  v.setUint16(22,2,true); v.setUint32(24,sampleRate,true);
+  v.setUint32(28,sampleRate*4,true); v.setUint16(32,4,true); v.setUint16(34,16,true);
+  w(v,36,'data'); v.setUint32(40,n*4,true);
+  let off=44;
+  for(let i=0;i<n;i++){
+    let l=Math.max(-1,Math.min(1,L[i])), r=Math.max(-1,Math.min(1,R[i]));
+    v.setInt16(off, l<0? l*0x8000 : l*0x7FFF, true); off+=2;
+    v.setInt16(off, r<0? r*0x8000 : r*0x7FFF, true); off+=2;
+  }
+  return v;
+}
+function w(view, off, str){ for(let i=0;i<str.length;i++) view.setUint8(off+i, str.charCodeAt(i)); }
+
+/* ===== UI glue ===== */
+fileInput.addEventListener('change', async (e)=>{
+  const f = e.target.files?.[0]; if(!f) return;
+  try{ imgBitmap = await createImageBitmap(f); }
+  catch{
+    const img=new Image(); const url=URL.createObjectURL(f);
+    await new Promise((res,rej)=>{ img.onload=res; img.onerror=rej; img.src=url; });
+    const tmp=document.createElement('canvas'); tmp.width=img.naturalWidth; tmp.height=img.naturalHeight;
+    tmp.getContext('2d').drawImage(img,0,0);
+    imgBitmap = await createImageBitmap(tmp); URL.revokeObjectURL(url);
+  }
+  const sc=Math.min(canvas.width/imgBitmap.width, canvas.height/imgBitmap.height);
+  const w=Math.max(1,Math.floor(imgBitmap.width*sc)), h=Math.max(1,Math.floor(imgBitmap.height*sc));
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.drawImage(imgBitmap,(canvas.width-w)/2,(canvas.height-h)/2,w,h);
+
+  renderBtn.disabled=false;
+  statsEl.textContent=`Изображение: ${imgBitmap.width}×${imgBitmap.height} px\nНажмите «Синтезировать».`;
+});
+
+renderBtn.addEventListener('click', async ()=>{
+  if(!imgBitmap || isRendering) return;
+  isRendering=true; renderBtn.disabled=true; playBtn.disabled=true; exportBtn.disabled=true;
+  stopAudio(); await resumeAudio();
+  statsEl.textContent='Синтез… (медленные, плавные изменения, без ладов)';
+
+  try{
+    const opts = {
+      duration: +durEl.value,
+      gain: +gainEl.value,
+      f0Range: f0RangeEl.value,
+      pitchSmooth: +pitchSmoothEl.value,
+      harmCount: +harmCountEl.value,
+      pluckSoft: +pluckSoftEl.value,
+      delayMix: +delayMixEl.value,
+      revMix: +revMixEl.value,
+      scanMode: scanModeEl.value,
+      stereo: +stereoEl.value
+    };
+    const res = renderFromImageNatural(imgBitmap, opts);
+
+    ensureAudio(res.sampleRate);
+    // загрузим IR в Convolver
+    const irBuf = audioCtx.createBuffer(2, res.ir.L.length, res.sampleRate);
+    irBuf.copyToChannel(res.ir.L,0,0); irBuf.copyToChannel(res.ir.R,1,0);
+    convolver.buffer = irBuf;
+
+    // основной буфер
+    const N=res.L.length;
+    renderedBuffer = audioCtx.createBuffer(2,N,res.sampleRate);
+    renderedBuffer.copyToChannel(res.L,0,0);
+    renderedBuffer.copyToChannel(res.R,1,0);
+
+    // play
+    source = audioCtx.createBufferSource();
+    source.buffer = renderedBuffer;
+    source.connect(convolver); // convolver -> master -> dest настроено
+    if(audioCtx.state!=='running'){ try{ await audioCtx.resume(); }catch{} }
+    source.start();
+
+    playBtn.disabled=false; stopBtn.disabled=false; exportBtn.disabled=false;
+
+    statsEl.textContent=`Готово ✓  Длительность: ${opts.duration}s, SR ${res.sampleRate} Hz
+Плэки из краёв изображения, f0 — сглаженная яркость, гармоники натуральные.
+Советы: ↑ «Мягкость pluck» → мягче; ↑ «Реверберация/Дилей» → больше «воздуха».`;
+  }catch(e){
+    console.error(e);
+    alert('Ошибка синтеза: '+(e?.message||e));
+    statsEl.textContent='Ошибка синтеза. Откройте консоль.';
+  }finally{
+    isRendering=false; renderBtn.disabled=false;
+  }
+});
+
+playBtn.addEventListener('click', async ()=>{
+  if(!renderedBuffer) return; stopAudio(); ensureAudio(renderedBuffer.sampleRate);
+  if(audioCtx.state!=='running'){ try{ await audioCtx.resume(); }catch{} }
+  source = audioCtx.createBufferSource(); source.buffer=renderedBuffer; source.connect(convolver); source.start();
+});
+stopBtn.addEventListener('click', ()=> stopAudio());
+exportBtn.addEventListener('click', ()=>{
+  if(!renderedBuffer) return;
+  const sr=renderedBuffer.sampleRate, n=renderedBuffer.length;
+  const L=new Float32Array(n), R=new Float32Array(n);
+  renderedBuffer.copyFromChannel(L,0,0); renderedBuffer.copyFromChannel(R,1,0);
+  const wav = interleavedStereoToWavPCM16(L,R,sr);
+  const blob = new Blob([wav],{type:'audio/wav'}); const url=URL.createObjectURL(blob);
+  const a=document.createElement('a'); a.href=url; a.download='image_harmonic_drone.wav'; a.click(); URL.revokeObjectURL(url);
+});
+</script>
+</body>
+</html>
